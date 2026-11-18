@@ -1,7 +1,9 @@
 //! Install planning: turns selected applications into winget and Chocolatey package IDs.
 //!
 //! Mirrors `Get-WinUtilSelectedPackages` and the install command lines in the PowerShell
-//! original. Running the commands is a separate concern and lives elsewhere.
+//! original. Running the commands lives in [`run`].
+
+pub mod run;
 
 use indexmap::IndexSet;
 
@@ -16,6 +18,7 @@ pub enum PackageManager {
 }
 
 /// Package IDs to install, split by manager. Each set is deduplicated and keeps selection order.
+/// WinGet IDs keep an `msstore:` prefix when they come from the Microsoft Store.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub winget: IndexSet<String>,
@@ -37,8 +40,16 @@ pub fn plan<'a>(apps: impl IntoIterator<Item = &'a Application>, preference: Pac
     plan
 }
 
-/// Arguments for `winget` that install one package from the winget source.
-pub fn winget_install_args(id: &str) -> [&str; 8] {
+/// Splits an `msstore:` prefix off a WinGet ID, returning the source and the bare ID.
+pub fn winget_source(raw: &str) -> (&'static str, &str) {
+    match raw.get(..8) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("msstore:") => ("msstore", &raw[8..]),
+        _ => ("winget", raw),
+    }
+}
+
+/// Arguments for `winget` that install one package from `source`.
+pub fn winget_install_args<'a>(source: &'a str, id: &'a str) -> [&'a str; 8] {
     [
         "install",
         "--id",
@@ -46,7 +57,7 @@ pub fn winget_install_args(id: &str) -> [&str; 8] {
         "--accept-package-agreements",
         "--accept-source-agreements",
         "--source",
-        "winget",
+        source,
         "--silent",
     ]
 }
@@ -137,9 +148,17 @@ mod tests {
     }
 
     #[test]
+    fn msstore_prefix_selects_store_source_and_strips_prefix() {
+        assert_eq!(winget_source("msstore:9NT1R1C2HH7J"), ("msstore", "9NT1R1C2HH7J"));
+        assert_eq!(winget_source("MSSTORE:abc"), ("msstore", "abc"));
+        assert_eq!(winget_source("Git.Git"), ("winget", "Git.Git"));
+        assert_eq!(winget_source("msstor"), ("winget", "msstor"));
+    }
+
+    #[test]
     fn winget_install_args_match_original_command() {
         assert_eq!(
-            winget_install_args("Git.Git"),
+            winget_install_args("winget", "Git.Git"),
             [
                 "install",
                 "--id",
