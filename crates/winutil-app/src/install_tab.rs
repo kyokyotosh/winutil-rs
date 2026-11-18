@@ -9,12 +9,13 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 use winutil_core::config::Config;
 use winutil_core::install::run::{Manager, Outcome, Report, run_plan};
-use winutil_core::install::{self, PackageManager};
+use winutil_core::install::{self, Availability, Needs, PackageManager};
 
 pub struct InstallTab {
     config: Config,
     selected: HashSet<String>,
     preference: PackageManager,
+    available: Availability,
     running: Option<Receiver<Report>>,
     reports: Vec<Report>,
 }
@@ -25,6 +26,7 @@ impl InstallTab {
             config,
             selected: HashSet::new(),
             preference: PackageManager::Winget,
+            available: Availability::detect(),
             running: None,
             reports: Vec::new(),
         }
@@ -56,8 +58,22 @@ impl InstallTab {
                 ui.ctx().request_repaint();
             }
         });
+        if !self.available.winget {
+            ui.colored_label(
+                egui::Color32::RED,
+                "WinGet is not installed. Packages that need it are skipped. Install App Installer from the Microsoft Store.",
+            );
+        }
+        if !self.available.choco {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Chocolatey is not installed. Packages that need it are skipped. Install it from https://chocolatey.org/install.",
+            );
+        }
         ui.separator();
 
+        let preference = self.preference;
+        let available = self.available;
         let config = &self.config;
         let selected = &mut self.selected;
         let reports = &self.reports;
@@ -69,9 +85,21 @@ impl InstallTab {
                             for key in keys {
                                 let app = &config.applications[key];
                                 let mut on = selected.contains(key);
-                                let response = ui.checkbox(&mut on, &app.content);
-                                let response = response.on_hover_text(&app.description);
-                                if response.changed() {
+                                let missing = missing_text(install::needs(app, preference), available);
+                                let text = match missing {
+                                    Some(_) => egui::RichText::new(&app.content).color(egui::Color32::RED),
+                                    None => egui::RichText::new(&app.content),
+                                };
+                                let changed = ui
+                                    .horizontal(|ui| {
+                                        let response = ui.checkbox(&mut on, text).on_hover_text(&app.description);
+                                        if let Some(missing) = missing {
+                                            ui.colored_label(egui::Color32::RED, missing);
+                                        }
+                                        response.changed()
+                                    })
+                                    .inner;
+                                if changed {
                                     if on {
                                         selected.insert(key.to_owned());
                                     } else {
@@ -135,13 +163,17 @@ impl InstallTab {
             .filter(|(key, _)| self.selected.contains(key.as_str()))
             .map(|(_, app)| app);
         let plan = install::plan(apps, self.preference);
+        let (plan, skipped) = install::skip_unavailable(plan, self.available);
         let (tx, rx) = mpsc::channel();
+        self.reports.clear();
+        for report in skipped {
+            let _ = tx.send(report);
+        }
         std::thread::spawn(move || {
             run_plan(&plan, |report| {
                 let _ = tx.send(report.clone());
             });
         });
-        self.reports.clear();
         self.running = Some(rx);
     }
 }
@@ -157,6 +189,7 @@ fn manager_label(manager: Manager) -> &'static str {
     match manager {
         Manager::Winget => "WinGet",
         Manager::Choco => "Chocolatey",
+        Manager::Msi => "MSI",
     }
 }
 
@@ -165,5 +198,15 @@ fn outcome_label(outcome: Outcome) -> &'static str {
         Outcome::Succeeded => "Succeeded",
         Outcome::Skipped => "Skipped",
         Outcome::Failed => "Failed",
+    }
+}
+
+/// Names the managers an app needs that are not installed, or `None` when nothing it needs is missing.
+fn missing_text(needs: Needs, available: Availability) -> Option<&'static str> {
+    match (needs.winget && !available.winget, needs.choco && !available.choco) {
+        (true, true) => Some("needs WinGet and Chocolatey"),
+        (true, false) => Some("needs WinGet"),
+        (false, true) => Some("needs Chocolatey"),
+        (false, false) => None,
     }
 }

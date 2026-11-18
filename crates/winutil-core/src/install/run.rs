@@ -6,6 +6,7 @@
 
 use std::process::Command;
 
+use super::msi::{self, MsiHost, system::SystemMsi};
 use super::{Plan, choco_install_args, winget_install_args, winget_source};
 
 /// How many trailing output lines a failed package keeps for the log.
@@ -23,6 +24,8 @@ pub enum Outcome {
 pub enum Manager {
     Winget,
     Choco,
+    /// The direct PowerShell 7 MSI upgrade, which is not a package manager.
+    Msi,
 }
 
 /// The result of installing one package.
@@ -39,19 +42,20 @@ pub struct Report {
     pub tail: Vec<String>,
 }
 
-/// Installs every package in `plan` using the real `winget` and `choco` commands.
-/// WinGet runs first, then Chocolatey, matching the original order. `on_report` runs after each
-/// package so a caller can show progress.
+/// Installs every package in `plan` using the real `winget` and `choco` commands, and the direct
+/// MSI upgrade for PowerShell 7. WinGet runs first, then Chocolatey, matching the original order.
+/// `on_report` runs after each package so a caller can show progress.
 pub fn run_plan(plan: &Plan, on_report: impl FnMut(&Report)) -> Vec<Report> {
-    run_plan_with(plan, run_command, on_report)
+    run_plan_with(plan, run_command, &mut SystemMsi, on_report)
 }
 
-/// Like [`run_plan`], with the process runner supplied by the caller. The runner receives the
-/// program and its arguments, and returns the exit code and combined output, or `None` when the
-/// program could not be started.
+/// Like [`run_plan`], with the process runner and MSI host supplied by the caller. The runner
+/// receives the program and its arguments, and returns the exit code and combined output, or
+/// `None` when the program could not be started.
 pub fn run_plan_with(
     plan: &Plan,
     mut run: impl FnMut(&str, &[&str]) -> Option<(i32, String)>,
+    host: &mut impl MsiHost,
     mut on_report: impl FnMut(&Report),
 ) -> Vec<Report> {
     let mut reports = Vec::with_capacity(plan.winget.len() + plan.choco.len());
@@ -62,6 +66,12 @@ pub fn run_plan_with(
 
     for raw in &plan.winget {
         let (source, id) = winget_source(raw);
+        if id.eq_ignore_ascii_case(msi::PACKAGE_ID) {
+            if let Some(report) = msi::update(host) {
+                finish(report);
+                continue;
+            }
+        }
         let args = winget_install_args(source, id);
         let report = make_report(
             Manager::Winget,

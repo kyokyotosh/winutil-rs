@@ -4,9 +4,13 @@
 //! original. Running the commands lives in [`run`].
 
 pub mod run;
+pub mod msi;
+
+use std::ffi::OsStr;
 
 use indexmap::{IndexMap, IndexSet};
 
+use self::run::{Manager, Outcome, Report};
 use crate::config::applications::Application;
 
 /// The package manager the user prefers. Applications without a usable Chocolatey ID fall back
@@ -87,6 +91,85 @@ fn push_ids(target: &mut IndexSet<String>, raw: &str) {
         if !id.is_empty() && !id.eq_ignore_ascii_case("na") {
             target.insert(id.to_owned());
         }
+    }
+}
+
+/// Shown on a skipped report when WinGet is not installed.
+const WINGET_MISSING: &str = "not attempted: WinGet is not installed. Install App Installer from the Microsoft Store, then try again.";
+/// Shown on a skipped report when Chocolatey is not installed.
+const CHOCO_MISSING: &str = "not attempted: Chocolatey is not installed. Install it from https://chocolatey.org/install, then try again.";
+
+/// Which package managers are installed. A package whose manager is missing is skipped with a
+/// message, instead of failing with a process-start error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Availability {
+    pub winget: bool,
+    pub choco: bool,
+}
+
+impl Availability {
+    /// Looks for `winget.exe` and `choco.exe` on the current `PATH`.
+    pub fn detect() -> Self {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        Self {
+            winget: find_program("winget", &path),
+            choco: find_program("choco", &path),
+        }
+    }
+}
+
+/// Whether `<program>.exe` exists in a directory listed in `path`, a `PATH`-style value.
+pub fn find_program(program: &str, path: &OsStr) -> bool {
+    std::env::split_paths(path).any(|dir| dir.join(format!("{program}.exe")).is_file())
+}
+
+/// Which package managers one app needs under `preference`, from the same plan the install uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Needs {
+    pub winget: bool,
+    pub choco: bool,
+}
+
+pub fn needs(app: &Application, preference: PackageManager) -> Needs {
+    let planned = plan([app], preference);
+    Needs {
+        winget: !planned.winget.is_empty(),
+        choco: !planned.choco.is_empty(),
+    }
+}
+
+/// Drops planned packages whose manager is not installed. Each dropped package gets a `Skipped`
+/// report that says what to install, so the log shows why nothing was attempted.
+pub fn skip_unavailable(plan: Plan, available: Availability) -> (Plan, Vec<Report>) {
+    let mut skipped = Vec::new();
+    let winget = if available.winget {
+        plan.winget
+    } else {
+        for raw in &plan.winget {
+            let (_, id) = winget_source(raw);
+            skipped.push(skip_report(Manager::Winget, id, WINGET_MISSING));
+        }
+        IndexSet::new()
+    };
+    let choco = if available.choco {
+        plan.choco
+    } else {
+        for id in &plan.choco {
+            skipped.push(skip_report(Manager::Choco, id, CHOCO_MISSING));
+        }
+        IndexSet::new()
+    };
+    (Plan { winget, choco }, skipped)
+}
+
+fn skip_report(manager: Manager, package: &str, detail: &str) -> Report {
+    Report {
+        package: package.to_owned(),
+        manager,
+        exit_code: -1,
+        outcome: Outcome::Skipped,
+        detail: detail.to_owned(),
+        tail: Vec::new(),
     }
 }
 
