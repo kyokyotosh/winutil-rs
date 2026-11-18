@@ -45,6 +45,9 @@ impl MsiHost for NoMsi {
     fn install(&mut self, _: &Path) -> Result<i32, String> {
         unreachable!("MSI path not expected")
     }
+    fn install_msix(&mut self, _: &Path) -> Result<(), String> {
+        unreachable!("MSI path not expected")
+    }
     fn remove(&mut self, _: &Path) {
         unreachable!("MSI path not expected")
     }
@@ -79,6 +82,9 @@ impl MsiHost for TwoMsiInstalls {
         unreachable!("two installs are rejected before any probe")
     }
     fn install(&mut self, _: &Path) -> Result<i32, String> {
+        unreachable!("two installs are rejected before any probe")
+    }
+    fn install_msix(&mut self, _: &Path) -> Result<(), String> {
         unreachable!("two installs are rejected before any probe")
     }
     fn remove(&mut self, _: &Path) {

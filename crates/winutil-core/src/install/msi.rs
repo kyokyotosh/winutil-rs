@@ -23,6 +23,7 @@ pub const PACKAGE_ID: &str = "Microsoft.PowerShell";
 const MULTIPLE_DETAIL: &str = "Multiple stable PowerShell MSI installations detected; upgrade each installation manually. No direct MSI upgrade was attempted.";
 const PINS_DETAIL: &str = "WinGet pins exist or their state could not be verified; MSI upgrade skipped";
 const CURRENT_DETAIL: &str = "PowerShell is already current";
+const MSIX_DETAIL: &str = "PowerShell installed from the MSIX bundle; the existing MSI install was not changed";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Release {
@@ -50,12 +51,15 @@ pub trait MsiHost {
     /// Whether WinGet's pin list allows an upgrade (see [`pins_allow_upgrade`]).
     fn upgrade_allowed(&mut self) -> bool;
     fn latest_release(&mut self) -> Result<Release, String>;
-    fn scratch_path(&mut self, arch: &str) -> PathBuf;
+    /// A fresh temp path ending in `.<extension>`.
+    fn scratch_path(&mut self, extension: &str) -> PathBuf;
     fn download(&mut self, url: &str, dest: &Path) -> Result<(), String>;
     /// Checks the SHA-256 when GitHub supplies a digest, then the Microsoft Authenticode signature.
     fn verify(&mut self, msi: &Path, digest: Option<&str>) -> Result<(), String>;
     /// Runs `msiexec /i <msi> /qn /norestart` and returns its exit code.
     fn install(&mut self, msi: &Path) -> Result<i32, String>;
+    /// Installs an MSIX bundle for the current user with `Add-AppxPackage`.
+    fn install_msix(&mut self, bundle: &Path) -> Result<(), String>;
     fn remove(&mut self, path: &Path);
 }
 
@@ -102,19 +106,30 @@ fn upgrade(host: &mut impl MsiHost, install: &Path) -> Result<(Outcome, i32, Str
     if !matches!(arch.as_str(), "x64" | "x86" | "arm64") {
         return Err(format!("unsupported PowerShell architecture: {arch}"));
     }
-    let asset = pick_asset(&release.assets, &arch)
-        .ok_or_else(|| format!("No PowerShell MSI found for {arch}"))?;
+    let package = pick_package(&release.assets, &arch)
+        .ok_or_else(|| format!("No PowerShell MSI or MSIX bundle found for {arch}"))?;
+    let (asset, msix) = match package {
+        Package::Msi(asset) => (asset, false),
+        Package::Msix(asset) => (asset, true),
+    };
 
-    let msi = host.scratch_path(&arch);
+    let scratch = host.scratch_path(if msix { "msixbundle" } else { "msi" });
     let result = host
-        .download(&asset.browser_download_url, &msi)
-        .and_then(|()| host.verify(&msi, asset.digest.as_deref()))
-        .and_then(|()| host.install(&msi));
-    // Remove the MSI whether or not the download, verification, or install succeeded.
-    host.remove(&msi);
+        .download(&asset.browser_download_url, &scratch)
+        .and_then(|()| host.verify(&scratch, asset.digest.as_deref()))
+        .and_then(|()| {
+            if msix {
+                host.install_msix(&scratch).map(|()| 0)
+            } else {
+                host.install(&scratch)
+            }
+        });
+    // Remove the installer whether or not the download, verification, or install succeeded.
+    host.remove(&scratch);
 
     let code = result?;
     match code {
+        _ if msix => Ok((Outcome::Succeeded, code, MSIX_DETAIL.to_owned())),
         0 | 3010 | 1641 => Ok((Outcome::Succeeded, code, success_detail(code).to_owned())),
         _ => Err(format!("PowerShell MSI installation failed with exit code {code}")),
     }
@@ -185,6 +200,28 @@ pub fn pick_asset<'a>(assets: &'a [Asset], arch: &str) -> Option<&'a Asset> {
     })
 }
 
+/// First asset named `PowerShell-*.msixbundle`. The bundle covers every architecture.
+pub fn pick_msixbundle(assets: &[Asset]) -> Option<&Asset> {
+    assets.iter().find(|asset| {
+        let name = asset.name.to_ascii_lowercase();
+        name.starts_with("powershell-") && name.ends_with(".msixbundle")
+    })
+}
+
+/// Which installer a release offers; the MSI is preferred because it upgrades in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Package<'a> {
+    Msi(&'a Asset),
+    Msix(&'a Asset),
+}
+
+/// The installer for a release: an MSI for `arch` when one exists, otherwise the MSIX bundle.
+pub fn pick_package<'a>(assets: &'a [Asset], arch: &str) -> Option<Package<'a>> {
+    pick_asset(assets, arch)
+        .map(Package::Msi)
+        .or_else(|| pick_msixbundle(assets).map(Package::Msix))
+}
+
 /// Compares a GitHub digest (`sha256:<hex>`, prefix optional) with the file's SHA-256 in hex.
 pub fn digest_matches(expected: &str, actual_hex: &str) -> bool {
     let expected = expected.trim().to_ascii_lowercase();
@@ -230,6 +267,7 @@ mod tests {
         download: Option<Result<(), String>>,
         verify: Option<Result<(), String>>,
         install: Option<Result<i32, String>>,
+        install_msix: Option<Result<(), String>>,
         calls: Vec<String>,
     }
 
@@ -247,6 +285,7 @@ mod tests {
                 download: Some(Ok(())),
                 verify: Some(Ok(())),
                 install: Some(Ok(0)),
+                install_msix: Some(Ok(())),
                 calls: Vec::new(),
             }
         }
@@ -272,8 +311,8 @@ mod tests {
             self.calls.push("release".into());
             self.release.clone().expect("release set")
         }
-        fn scratch_path(&mut self, arch: &str) -> PathBuf {
-            PathBuf::from(format!("scratch-{arch}.msi"))
+        fn scratch_path(&mut self, extension: &str) -> PathBuf {
+            PathBuf::from(format!("scratch.{extension}"))
         }
         fn download(&mut self, _: &str, _: &Path) -> Result<(), String> {
             self.calls.push("download".into());
@@ -286,6 +325,10 @@ mod tests {
         fn install(&mut self, _: &Path) -> Result<i32, String> {
             self.calls.push("install".into());
             self.install.clone().expect("install set")
+        }
+        fn install_msix(&mut self, _: &Path) -> Result<(), String> {
+            self.calls.push("install_msix".into());
+            self.install_msix.clone().expect("install_msix set")
         }
         fn remove(&mut self, _: &Path) {
             self.calls.push("remove".into());
@@ -406,8 +449,62 @@ mod tests {
         };
         let report = update(&mut host).unwrap();
         assert_eq!(report.outcome, Outcome::Failed);
-        assert_eq!(report.detail, "PowerShell MSI upgrade failed: No PowerShell MSI found for x64");
+        assert_eq!(report.detail, "PowerShell MSI upgrade failed: No PowerShell MSI or MSIX bundle found for x64");
         assert!(!host.calls.contains(&"download".to_owned()));
+    }
+
+    #[test]
+    fn msixbundle_is_installed_when_no_msi_asset_exists() {
+        let mut host = Fake {
+            release: Some(Ok(Release {
+                tag_name: "v7.7.0".to_owned(),
+                assets: vec![asset("PowerShell-7.7.0.msixbundle")],
+            })),
+            ..Fake::happy()
+        };
+        let report = update(&mut host).unwrap();
+        assert_eq!(report.outcome, Outcome::Succeeded);
+        assert_eq!(report.exit_code, 0);
+        assert!(host.calls.contains(&"install_msix".to_owned()));
+        assert!(!host.calls.contains(&"install".to_owned()));
+        assert_eq!(host.calls.last().map(String::as_str), Some("remove"));
+    }
+
+    #[test]
+    fn msixbundle_install_failure_is_reported_and_bundle_removed() {
+        let mut host = Fake {
+            release: Some(Ok(Release {
+                tag_name: "v7.7.0".to_owned(),
+                assets: vec![asset("PowerShell-7.7.0.msixbundle")],
+            })),
+            install_msix: Some(Err("MSIX bundle installation failed with exit code 1".to_owned())),
+            ..Fake::happy()
+        };
+        let report = update(&mut host).unwrap();
+        assert_eq!(report.outcome, Outcome::Failed);
+        assert_eq!(
+            report.detail,
+            "PowerShell MSI upgrade failed: MSIX bundle installation failed with exit code 1"
+        );
+        assert_eq!(host.calls.last().map(String::as_str), Some("remove"));
+    }
+
+    #[test]
+    fn msi_is_preferred_over_msixbundle() {
+        let assets = [asset("PowerShell-7.6.0.msixbundle"), asset("PowerShell-7.6.0-win-x64.msi")];
+        assert_eq!(pick_package(&assets, "x64"), Some(Package::Msi(&assets[1])));
+    }
+
+    #[test]
+    fn msixbundle_is_picked_when_no_msi_matches_arch() {
+        let assets = [asset("PowerShell-7.7.0-win-x64.zip"), asset("PowerShell-7.7.0.msixbundle")];
+        assert_eq!(pick_package(&assets, "arm64"), Some(Package::Msix(&assets[1])));
+    }
+
+    #[test]
+    fn zip_alone_is_not_an_installer() {
+        let assets = [asset("PowerShell-7.7.0-win-x64.zip")];
+        assert_eq!(pick_package(&assets, "x64"), None);
     }
 
     #[test]

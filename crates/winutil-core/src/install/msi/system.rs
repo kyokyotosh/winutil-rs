@@ -97,12 +97,12 @@ impl MsiHost for SystemMsi {
         serde_json::from_str(&body).map_err(|error| format!("GitHub release JSON was invalid: {error}"))
     }
 
-    fn scratch_path(&mut self, arch: &str) -> PathBuf {
+    fn scratch_path(&mut self, extension: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
-        std::env::temp_dir().join(format!("PowerShell-{arch}-{nanos:x}-{}.msi", std::process::id()))
+        std::env::temp_dir().join(format!("PowerShell-{nanos:x}-{}.{extension}", std::process::id()))
     }
 
     fn download(&mut self, url: &str, dest: &Path) -> Result<(), String> {
@@ -150,6 +150,19 @@ impl MsiHost for SystemMsi {
         run_command("msiexec.exe", &args)
             .map(|(code, _)| code)
             .ok_or_else(|| "msiexec did not start".to_owned())
+    }
+
+    fn install_msix(&mut self, bundle: &Path) -> Result<(), String> {
+        let quoted = bundle.display().to_string().replace('\'', "''");
+        let script = format!("Add-AppxPackage -Path '{quoted}' -ErrorAction Stop");
+        let args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script.as_str()];
+        let (code, _) = run_command("powershell.exe", &args)
+            .ok_or_else(|| "could not start powershell.exe to install the MSIX bundle".to_owned())?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(format!("MSIX bundle installation failed with exit code {code}"))
+        }
     }
 
     fn remove(&mut self, path: &Path) {
