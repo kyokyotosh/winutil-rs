@@ -1,7 +1,9 @@
+mod features_tab;
 mod install_tab;
 mod tweaks_tab;
 
 use eframe::egui;
+use features_tab::FeaturesTab;
 use install_tab::InstallTab;
 use tweaks_tab::TweaksTab;
 
@@ -9,12 +11,14 @@ use tweaks_tab::TweaksTab;
 enum Page {
     Install,
     Tweaks,
+    Features,
 }
 
 struct WinUtilApp {
     page: Page,
     install: InstallTab,
     tweaks: TweaksTab,
+    features: FeaturesTab,
 }
 
 impl eframe::App for WinUtilApp {
@@ -24,11 +28,13 @@ impl eframe::App for WinUtilApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Install, "Install");
                 ui.selectable_value(&mut self.page, Page::Tweaks, "Tweaks");
+                ui.selectable_value(&mut self.page, Page::Features, "Features");
             });
             ui.separator();
             match self.page {
                 Page::Install => self.install.ui(ui),
                 Page::Tweaks => self.tweaks.ui(ui),
+                Page::Features => self.features.ui(ui),
             }
         });
     }
@@ -45,6 +51,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(WinUtilApp {
                 page: Page::Install,
                 install: InstallTab::new(config.clone()),
+                features: FeaturesTab::new(config.clone()),
                 tweaks: TweaksTab::new(config),
             }))
         }),

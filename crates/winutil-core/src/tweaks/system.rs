@@ -4,9 +4,9 @@
 //! Only the glue lives here. The decisions it feeds are tested in the parent module and in
 //! `tests/tweaks_run.rs`.
 
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use winreg::RegKey;
@@ -19,53 +19,11 @@ use super::run::{TweakHost, Written};
 use super::{Hive, RegWrite, split_path};
 use crate::config::registry::{RegType, RegValue};
 use crate::config::tweaks::StartupType;
-use crate::install::run::run_command;
+use crate::install::run::{last_line, run_command};
 use crate::net;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
-
-/// Helpers that tweak scripts call by name. `Invoke-WinUtilExplorerUpdate` is copied from the
-/// original's `functions/private`; its `Invoke-WPFRunspace` wrapper is dropped because the call
-/// here is already synchronous.
-const POWERSHELL_PRELUDE: &str = r#"
-function Invoke-WinUtilExplorerUpdate {
-    param (
-        [string]$action = "refresh"
-    )
-
-    if ($action -eq "refresh") {
-        if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
-            Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
-    public static extern IntPtr SendMessageTimeout(
-        IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
-        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-}
-"@
-        }
-
-        $HWND_BROADCAST = [IntPtr]0xffff
-        $WM_SETTINGCHANGE = 0x1A
-        $SMTO_ABORTIFHUNG = 0x2
-
-        [Win32]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE,
-            [IntPtr]::Zero, "ImmersiveColorSet", $SMTO_ABORTIFHUNG, 100,
-            [ref]([IntPtr]::Zero))
-    } elseif ($action -eq "restart") {
-        taskkill.exe /F /IM "explorer.exe"
-        Start-Process "explorer.exe"
-    }
-}
-"#;
-
-/// The text sent to PowerShell: the helpers, then the tweak's own script.
-pub fn powershell_input(script: &str) -> String {
-    format!("{POWERSHELL_PRELUDE}\n{script}")
-}
 
 /// The production host. Stateless: each call talks to the machine directly.
 pub struct SystemTweaks;
@@ -153,27 +111,7 @@ impl TweakHost for SystemTweaks {
     }
 
     fn run_script(&mut self, script: &str) -> Result<(), String> {
-        let mut child = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("PowerShell could not be started: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(powershell_input(script).as_bytes())
-                .map_err(|e| format!("could not send the script to PowerShell: {e}"))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("PowerShell did not finish: {e}"))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let code = output.status.code().unwrap_or(-1);
-        let text = String::from_utf8_lossy(&output.stderr);
-        Err(format!("exit code {code}: {}", last_line(&text)))
+        crate::powershell::run_script(script)
     }
 
     fn run_program(&mut self, program: &str, args: &[&str]) -> Option<(i32, String)> {
@@ -247,11 +185,6 @@ pub fn startup_from_start(start: u32) -> Result<StartupType, String> {
     }
 }
 
-/// The last non-empty line of `text`, for error messages.
-fn last_line(text: &str) -> &str {
-    text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back().unwrap_or("no output")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,11 +223,5 @@ mod tests {
         assert_eq!(startup_from_start(3), Ok(StartupType::Manual));
         assert_eq!(startup_from_start(4), Ok(StartupType::Disabled));
         assert!(startup_from_start(1).is_err(), "system drivers have no tweak equivalent");
-    }
-
-    #[test]
-    fn last_line_skips_blank_trailing_lines() {
-        assert_eq!(last_line("first\nsecond\n\n"), "second");
-        assert_eq!(last_line(""), "no output");
     }
 }

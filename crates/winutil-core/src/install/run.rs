@@ -186,6 +186,11 @@ pub(super) fn last_lines(output: &str) -> Vec<String> {
     lines[start..].iter().map(|line| (*line).to_owned()).collect()
 }
 
+/// The last non-blank line of `text`, or `no output` when there is none.
+pub fn last_line(text: &str) -> &str {
+    text.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or("no output")
+}
+
 /// Runs a program to completion and returns its exit code and combined stdout and stderr.
 /// Stdin is not inherited, so a prompt cannot block the run. Returns `None` if the program
 /// cannot be started.
@@ -275,5 +280,11 @@ mod tests {
     #[test]
     fn run_command_returns_none_for_missing_program() {
         assert_eq!(run_command("winutil-rs-no-such-program", &[]), None);
+    }
+
+    #[test]
+    fn last_line_skips_blank_trailing_lines() {
+        assert_eq!(last_line("first\nsecond\n\n"), "second");
+        assert_eq!(last_line(""), "no output");
     }
 }
