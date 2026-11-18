@@ -36,6 +36,7 @@ impl InstallTab {
         self.drain();
         let busy = self.running.is_some();
         let mut start = false;
+        let mut install_choco = false;
 
         ui.horizontal(|ui| {
             ui.label("Prefer:");
@@ -65,10 +66,22 @@ impl InstallTab {
             );
         }
         if !self.available.choco {
-            ui.colored_label(
-                egui::Color32::RED,
-                "Chocolatey is not installed. Packages that need it are skipped. Install it from https://chocolatey.org/install.",
-            );
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "Chocolatey is not installed. Packages that need it are skipped.",
+                );
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Install Chocolatey"))
+                    .on_hover_text(format!(
+                        "Downloads {} and runs it in powershell.exe.",
+                        install::chocolatey::INSTALL_SCRIPT_URL
+                    ))
+                    .clicked()
+                {
+                    install_choco = true;
+                }
+            });
         }
         ui.separator();
 
@@ -136,6 +149,9 @@ impl InstallTab {
         if start {
             self.start();
         }
+        if install_choco {
+            self.start_chocolatey();
+        }
     }
 
     /// Moves finished package reports from the worker thread into the log.
@@ -152,6 +168,7 @@ impl InstallTab {
         };
         if finished {
             self.running = None;
+            self.available = Availability::detect();
         }
     }
 
@@ -175,6 +192,16 @@ impl InstallTab {
             });
         });
         self.running = Some(rx);
+    }
+
+    /// Installs Chocolatey on a worker thread and logs its result like a package.
+    fn start_chocolatey(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.reports.clear();
+        self.running = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(install::chocolatey::install());
+        });
     }
 }
 

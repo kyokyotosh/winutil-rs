@@ -3,8 +3,10 @@
 //! Mirrors `Get-WinUtilSelectedPackages` and the install command lines in the PowerShell
 //! original. Running the commands lives in [`run`].
 
+pub mod chocolatey;
 pub mod run;
 pub mod msi;
+pub mod path;
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -109,9 +111,10 @@ pub struct Availability {
 }
 
 impl Availability {
-    /// Looks for `winget.exe` and `choco.exe` on the current `PATH`.
+    /// Looks for `winget.exe` and `choco.exe` on the search path, which includes tools installed
+    /// since this process started (see [`path::search_path`]).
     pub fn detect() -> Self {
-        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = path::search_path();
         Self {
             winget: find_program("winget", &path),
             choco: find_program("choco", &path),

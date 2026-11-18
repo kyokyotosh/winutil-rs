@@ -4,9 +4,11 @@
 //! anything. Process spawning is isolated in [`run_command`], and orchestration takes the runner as
 //! a parameter so tests can substitute it.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 use super::msi::{self, MsiHost, system::SystemMsi};
+use super::path::search_path;
 use super::{Plan, choco_install_args, winget_install_args, winget_source};
 
 /// How many trailing output lines a failed package keeps for the log.
@@ -174,7 +176,7 @@ fn make_report(
     }
 }
 
-fn last_lines(output: &str) -> Vec<String> {
+pub(super) fn last_lines(output: &str) -> Vec<String> {
     let lines: Vec<&str> = output
         .lines()
         .map(str::trim)
@@ -188,7 +190,16 @@ fn last_lines(output: &str) -> Vec<String> {
 /// Stdin is not inherited, so a prompt cannot block the run. Returns `None` if the program
 /// cannot be started.
 pub fn run_command(program: &str, args: &[&str]) -> Option<(i32, String)> {
-    let output = Command::new(program).args(args).output().ok()?;
+    run_command_in(program, args, &search_path())
+}
+
+/// Like [`run_command`], but searches `path`, a `PATH`-style value, for `program`.
+pub fn run_command_in(program: &str, args: &[&str], path: &OsStr) -> Option<(i32, String)> {
+    let output = Command::new(program)
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .ok()?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     Some((output.status.code().unwrap_or(-1), text))
