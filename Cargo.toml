@@ -1,6 +1,11 @@
-[package]
-name = "winutil-rs"
+[workspace]
+resolver = "3"
+members = ["crates/winutil-core", "crates/winutil-app"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+publish = false
 
-[dependencies]
+[workspace.lints.rust]
+unsafe_code = "forbid"
