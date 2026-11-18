@@ -4,6 +4,8 @@
 
 pub mod config;
 pub mod install;
+pub mod net;
+pub mod tweaks;
 
 /// Display name of the application.
 pub const APP_NAME: &str = "WinUtil";

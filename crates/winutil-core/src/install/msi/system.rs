@@ -14,6 +14,7 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 use super::{MsiHost, Release, digest_matches, is_stable_pwsh7, pins_allow_upgrade, signature_trusted};
 use crate::install::find_on_path;
 use crate::install::run::run_command;
+use crate::net::{self, agent};
 
 const UNINSTALL_KEYS: [&str; 2] = [
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -112,17 +113,7 @@ impl MsiHost for SystemMsi {
     }
 
     fn download(&mut self, url: &str, dest: &Path) -> Result<(), String> {
-        let agent = agent(DOWNLOAD_TIMEOUT);
-        let mut response = agent
-            .get(url)
-            .header("User-Agent", "winutil-rs")
-            .call()
-            .map_err(|error| format!("download failed: {error}"))?;
-        let mut file = File::create(dest)
-            .map_err(|error| format!("could not create {}: {error}", dest.display()))?;
-        let mut body = response.body_mut().as_reader();
-        io::copy(&mut body, &mut file).map_err(|error| format!("download interrupted: {error}"))?;
-        Ok(())
+        net::download(url, dest, DOWNLOAD_TIMEOUT)
     }
 
     fn verify(&mut self, msi: &Path, digest: Option<&str>) -> Result<(), String> {
@@ -206,13 +197,6 @@ fn pwsh_output(pwsh: &Path, expression: &str) -> Result<String, String> {
         }
         None => Err(format!("could not start {program}")),
     }
-}
-
-fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .into()
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
