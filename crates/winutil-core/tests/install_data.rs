@@ -1,7 +1,7 @@
 //! Install planning checked against the shipped applications.
 
 use winutil_core::config::load;
-use winutil_core::install::{PackageManager, plan};
+use winutil_core::install::{PackageManager, group_by_category, plan};
 
 const PREFERENCES: [PackageManager; 2] = [PackageManager::Winget, PackageManager::Choco];
 
@@ -39,4 +39,13 @@ fn choco_preference_splits_dependency_ids_from_shipped_config() {
     let app = &cfg.applications["githubdesktop"];
     let plan = plan([app], PackageManager::Choco);
     assert_eq!(plan.choco.into_iter().collect::<Vec<_>>(), ["git", "github-desktop"]);
+}
+
+#[test]
+fn every_application_is_listed_in_a_named_category() {
+    let cfg = load().unwrap();
+    let groups = group_by_category(&cfg.applications);
+    let listed: usize = groups.values().map(Vec::len).sum();
+    assert_eq!(listed, cfg.applications.len());
+    assert!(groups.keys().all(|category| !category.trim().is_empty()));
 }

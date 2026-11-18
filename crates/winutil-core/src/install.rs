@@ -5,7 +5,7 @@
 
 pub mod run;
 
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::config::applications::Application;
 
@@ -38,6 +38,15 @@ pub fn plan<'a>(apps: impl IntoIterator<Item = &'a Application>, preference: Pac
         }
     }
     plan
+}
+
+/// Application keys grouped by category, with categories in the order they first appear.
+pub fn group_by_category(apps: &IndexMap<String, Application>) -> IndexMap<&str, Vec<&str>> {
+    let mut groups: IndexMap<&str, Vec<&str>> = IndexMap::new();
+    for (key, app) in apps {
+        groups.entry(app.category.as_str()).or_default().push(key.as_str());
+    }
+    groups
 }
 
 /// Splits an `msstore:` prefix off a WinGet ID, returning the source and the bare ID.
