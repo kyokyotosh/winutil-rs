@@ -25,6 +25,48 @@ use crate::net;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 
+/// Helpers that tweak scripts call by name. `Invoke-WinUtilExplorerUpdate` is copied from the
+/// original's `functions/private`; its `Invoke-WPFRunspace` wrapper is dropped because the call
+/// here is already synchronous.
+const POWERSHELL_PRELUDE: &str = r#"
+function Invoke-WinUtilExplorerUpdate {
+    param (
+        [string]$action = "refresh"
+    )
+
+    if ($action -eq "refresh") {
+        if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd, uint Msg, IntPtr wParam, string lParam,
+        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+}
+"@
+        }
+
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1A
+        $SMTO_ABORTIFHUNG = 0x2
+
+        [Win32]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE,
+            [IntPtr]::Zero, "ImmersiveColorSet", $SMTO_ABORTIFHUNG, 100,
+            [ref]([IntPtr]::Zero))
+    } elseif ($action -eq "restart") {
+        taskkill.exe /F /IM "explorer.exe"
+        Start-Process "explorer.exe"
+    }
+}
+"#;
+
+/// The text sent to PowerShell: the helpers, then the tweak's own script.
+pub fn powershell_input(script: &str) -> String {
+    format!("{POWERSHELL_PRELUDE}\n{script}")
+}
+
 /// The production host. Stateless: each call talks to the machine directly.
 pub struct SystemTweaks;
 
@@ -120,7 +162,7 @@ impl TweakHost for SystemTweaks {
             .map_err(|e| format!("PowerShell could not be started: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(script.as_bytes())
+                .write_all(powershell_input(script).as_bytes())
                 .map_err(|e| format!("could not send the script to PowerShell: {e}"))?;
         }
         let output = child
