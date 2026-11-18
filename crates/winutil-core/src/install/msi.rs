@@ -2,7 +2,8 @@
 //!
 //! When `Microsoft.PowerShell` is selected and a stable PowerShell 7 MSI is installed, the
 //! original downloads the current MSI from the GitHub release and installs it in place instead of
-//! letting WinGet handle it. With no MSI install, the caller falls through to the WinGet install.
+//! letting WinGet handle it. Without an MSI install, a `pwsh.exe` already at the latest release
+//! (MSIX, Store, or portable) is skipped; anything else falls through to the WinGet install.
 //!
 //! The decisions live here as pure functions. Everything that touches the machine goes through
 //! [`MsiHost`]; the real implementation is in [`system`].
@@ -24,6 +25,7 @@ const MULTIPLE_DETAIL: &str = "Multiple stable PowerShell MSI installations dete
 const PINS_DETAIL: &str = "WinGet pins exist or their state could not be verified; MSI upgrade skipped";
 const CURRENT_DETAIL: &str = "PowerShell is already current";
 const MSIX_DETAIL: &str = "PowerShell installed from the MSIX bundle; the existing MSI install was not changed";
+const STANDALONE_CURRENT_DETAIL: &str = "PowerShell 7 is already current (not an MSI install); WinGet was not run";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Release {
@@ -44,6 +46,8 @@ pub struct Asset {
 pub trait MsiHost {
     /// Install folders of stable PowerShell 7 MSI installs that contain `pwsh.exe`, deduplicated.
     fn msi_installs(&mut self) -> Vec<PathBuf>;
+    /// A `pwsh.exe` on `PATH`, such as a Store or MSIX install. Asked only when no MSI install exists.
+    fn standalone_pwsh(&mut self) -> Option<PathBuf>;
     /// `$PSVersionTable.PSVersion` as reported by `pwsh.exe`.
     fn installed_version(&mut self, pwsh: &Path) -> Result<String, String>;
     /// `ProcessArchitecture` as reported by `pwsh.exe`.
@@ -69,7 +73,7 @@ pub trait MsiHost {
 pub fn update(host: &mut impl MsiHost) -> Option<Report> {
     let installs = host.msi_installs();
     let (outcome, exit_code, detail) = match installs.as_slice() {
-        [] => return None,
+        [] => return standalone(host),
         [_, _, ..] => (Outcome::Failed, -1, MULTIPLE_DETAIL.to_owned()),
         [install] => {
             if host.upgrade_allowed() {
@@ -90,6 +94,32 @@ pub fn update(host: &mut impl MsiHost) -> Option<Report> {
         detail,
         tail: Vec::new(),
     })
+}
+
+/// Without an MSI install, a `pwsh.exe` on `PATH` that is already at the latest release is skipped
+/// so WinGet is not run. Returns `None` for an older install or when the versions cannot be
+/// compared, so WinGet decides as the original does.
+fn standalone(host: &mut impl MsiHost) -> Option<Report> {
+    let pwsh = host.standalone_pwsh()?;
+    if !standalone_is_current(host, &pwsh).ok()? {
+        return None;
+    }
+    Some(Report {
+        package: PACKAGE_ID.to_owned(),
+        manager: Manager::Msi,
+        exit_code: -1,
+        outcome: Outcome::Skipped,
+        detail: STANDALONE_CURRENT_DETAIL.to_owned(),
+        tail: Vec::new(),
+    })
+}
+
+/// Whether the `pwsh.exe` reports a version at least as new as the latest release.
+fn standalone_is_current(host: &mut impl MsiHost, pwsh: &Path) -> Result<bool, String> {
+    let installed = host.installed_version(pwsh)?;
+    let release = host.latest_release()?;
+    let latest = release.tag_name.trim().trim_start_matches('v');
+    version_at_least(&installed, latest)
 }
 
 /// Upgrades one MSI install. Errors are reported by the caller as `Failed`.
@@ -260,6 +290,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         installs: Vec<PathBuf>,
+        standalone: Option<PathBuf>,
         version: Option<Result<String, String>>,
         arch: Option<Result<String, String>>,
         pins_allow: bool,
@@ -275,6 +306,7 @@ mod tests {
         fn happy() -> Self {
             Self {
                 installs: vec![PathBuf::from(r"C:\Program Files\PowerShell\7")],
+                standalone: None,
                 version: Some(Ok("7.5.2".to_owned())),
                 arch: Some(Ok("X64".to_owned())),
                 pins_allow: true,
@@ -294,6 +326,10 @@ mod tests {
     impl MsiHost for Fake {
         fn msi_installs(&mut self) -> Vec<PathBuf> {
             self.installs.clone()
+        }
+        fn standalone_pwsh(&mut self) -> Option<PathBuf> {
+            self.calls.push("standalone".into());
+            self.standalone.clone()
         }
         fn installed_version(&mut self, _: &Path) -> Result<String, String> {
             self.calls.push("version".into());
@@ -339,7 +375,67 @@ mod tests {
     fn no_msi_install_returns_none_so_winget_runs() {
         let mut host = Fake { installs: Vec::new(), ..Fake::happy() };
         assert!(update(&mut host).is_none());
-        assert!(host.calls.is_empty());
+        assert_eq!(host.calls, ["standalone"]);
+    }
+
+    #[test]
+    fn current_standalone_pwsh_is_skipped_without_winget_or_download() {
+        let mut host = Fake {
+            installs: Vec::new(),
+            standalone: Some(PathBuf::from("pwsh.exe")),
+            version: Some(Ok("7.6.0".to_owned())),
+            ..Fake::happy()
+        };
+        let report = update(&mut host).unwrap();
+        assert_eq!(report.outcome, Outcome::Skipped);
+        assert_eq!(report.manager, Manager::Msi);
+        assert_eq!(report.detail, STANDALONE_CURRENT_DETAIL);
+        assert_eq!(host.calls, ["standalone", "version", "release"]);
+    }
+
+    #[test]
+    fn older_standalone_pwsh_falls_through_to_winget() {
+        let mut host = Fake {
+            installs: Vec::new(),
+            standalone: Some(PathBuf::from("pwsh.exe")),
+            version: Some(Ok("7.5.2".to_owned())),
+            ..Fake::happy()
+        };
+        assert!(update(&mut host).is_none());
+        assert_eq!(host.calls, ["standalone", "version", "release"]);
+    }
+
+    #[test]
+    fn standalone_version_that_cannot_be_compared_falls_through_to_winget() {
+        let mut host = Fake {
+            installs: Vec::new(),
+            standalone: Some(PathBuf::from("pwsh.exe")),
+            version: Some(Ok("7.8.0-preview.1".to_owned())),
+            ..Fake::happy()
+        };
+        assert!(update(&mut host).is_none());
+        assert!(!host.calls.contains(&"download".to_owned()));
+    }
+
+    #[test]
+    fn standalone_release_lookup_failure_falls_through_without_installing() {
+        let mut host = Fake {
+            installs: Vec::new(),
+            standalone: Some(PathBuf::from("pwsh.exe")),
+            release: Some(Err("GitHub release lookup failed: offline".to_owned())),
+            ..Fake::happy()
+        };
+        assert!(update(&mut host).is_none());
+        assert!(!host.calls.contains(&"install".to_owned()));
+        assert!(!host.calls.contains(&"install_msix".to_owned()));
+    }
+
+    #[test]
+    fn msi_install_takes_precedence_over_standalone_pwsh() {
+        let mut host = Fake { standalone: Some(PathBuf::from("pwsh.exe")), ..Fake::happy() };
+        let report = update(&mut host).unwrap();
+        assert_eq!(report.outcome, Outcome::Succeeded);
+        assert!(!host.calls.contains(&"standalone".to_owned()));
     }
 
     #[test]

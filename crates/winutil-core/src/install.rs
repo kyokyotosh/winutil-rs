@@ -7,6 +7,7 @@ pub mod run;
 pub mod msi;
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -118,9 +119,16 @@ impl Availability {
     }
 }
 
+/// The first `<program>.exe` in a directory listed in `path`, a `PATH`-style value.
+pub fn find_on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join(format!("{program}.exe")))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Whether `<program>.exe` exists in a directory listed in `path`, a `PATH`-style value.
 pub fn find_program(program: &str, path: &OsStr) -> bool {
-    std::env::split_paths(path).any(|dir| dir.join(format!("{program}.exe")).is_file())
+    find_on_path(program, path).is_some()
 }
 
 /// Which package managers one app needs under `preference`, from the same plan the install uses.

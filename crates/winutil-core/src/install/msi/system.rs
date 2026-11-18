@@ -12,6 +12,7 @@ use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
 
 use super::{MsiHost, Release, digest_matches, is_stable_pwsh7, pins_allow_upgrade, signature_trusted};
+use crate::install::find_on_path;
 use crate::install::run::run_command;
 
 const UNINSTALL_KEYS: [&str; 2] = [
@@ -61,6 +62,11 @@ impl MsiHost for SystemMsi {
             }
         }
         found
+    }
+
+    fn standalone_pwsh(&mut self) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        find_on_path("pwsh", &path)
     }
 
     fn installed_version(&mut self, pwsh: &Path) -> Result<String, String> {

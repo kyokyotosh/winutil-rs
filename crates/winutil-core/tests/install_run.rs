@@ -21,6 +21,9 @@ impl MsiHost for NoMsi {
     fn msi_installs(&mut self) -> Vec<PathBuf> {
         Vec::new()
     }
+    fn standalone_pwsh(&mut self) -> Option<PathBuf> {
+        None
+    }
     fn installed_version(&mut self, _: &Path) -> Result<String, String> {
         unreachable!("MSI path not expected")
     }
@@ -59,6 +62,9 @@ struct TwoMsiInstalls;
 impl MsiHost for TwoMsiInstalls {
     fn msi_installs(&mut self) -> Vec<PathBuf> {
         vec![PathBuf::from(r"C:\Program Files\PowerShell\7"), PathBuf::from(r"D:\PowerShell\7")]
+    }
+    fn standalone_pwsh(&mut self) -> Option<PathBuf> {
+        unreachable!("MSI path not expected")
     }
     fn installed_version(&mut self, _: &Path) -> Result<String, String> {
         unreachable!("two installs are rejected before any probe")
